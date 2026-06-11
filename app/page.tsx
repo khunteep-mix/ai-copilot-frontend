@@ -5,6 +5,7 @@ import { useState, useRef, useEffect } from "react";
 export default function Home() {
   // State Management
   const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false); // ✅ new state for pause
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [summary, setSummary] = useState<string>(""); 
   const [transcripts, setTranscripts] = useState<string[]>([]);
@@ -16,7 +17,7 @@ export default function Home() {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null); 
-  const chunkIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const chunkIntervalRef = useRef<NodeJS.Timeout | null>(null); // not used in new recorder flow
   const isRecordingRef = useRef<boolean>(false);
 
   // Auto-scroll to bottom of transcripts
@@ -24,7 +25,7 @@ export default function Home() {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcripts]);
 
-  // Handle RAG File Upload
+  // Handle RAG File Upload – NO CHANGE
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -49,11 +50,12 @@ export default function Home() {
     }
   };
 
-  // Start Recording Session
+  // ✅ Start Recording – rewritten to support Pause with a single MediaRecorder + timeslice
   const startRecording = async () => {
     try {
       setSummary(""); 
       setTranscripts([]); 
+      setIsPaused(false); // reset pause state
       
       await fetch("https://my-ai-backend-be42.onrender.com/api/meeting/reset", { method: "POST" });
       
@@ -76,47 +78,39 @@ export default function Home() {
 
       audioTrack.onended = () => stopRecording();
 
-      let currentRecorder: MediaRecorder | null = null;
+      // Clear any old interval (not used now, but for safety)
+      if (chunkIntervalRef.current) {
+        clearInterval(chunkIntervalRef.current);
+        chunkIntervalRef.current = null;
+      }
 
-      const startNewChunk = () => {
-        if (!isRecordingRef.current || !streamRef.current) return;
+      // Create a single MediaRecorder with timeslice (8s) – chunks auto-fire, pausable
+      const recorder = new MediaRecorder(audioStream, { mimeType: "audio/webm" });
+      mediaRecorderRef.current = recorder;
 
-        const recorder = new MediaRecorder(streamRef.current, { mimeType: "audio/webm" });
-        currentRecorder = recorder;
-        mediaRecorderRef.current = recorder;
-
-        recorder.ondataavailable = async (e) => {
-          if (e.data && e.data.size > 1000) {
-            const formData = new FormData();
-            formData.append("file", e.data, "chunk.webm");
-            formData.append("persona", persona); 
-            
-            try {
-              const response = await fetch("https://my-ai-backend-be42.onrender.com/api/audio/chunk", {
-                method: "POST",
-                body: formData,
-              });
-              const data = await response.json();
-              if (data.status === "success" && data.text) {
-                setTranscripts((prev) => [...prev, data.text]);
-              }
-            } catch (error) {
-              console.error("Backend connection error:", error);
+      recorder.ondataavailable = async (e) => {
+        if (e.data && e.data.size > 1000) {
+          const formData = new FormData();
+          formData.append("file", e.data, "chunk.webm");
+          formData.append("persona", persona); 
+          
+          try {
+            const response = await fetch("https://my-ai-backend-be42.onrender.com/api/audio/chunk", {
+              method: "POST",
+              body: formData,
+            });
+            const data = await response.json();
+            if (data.status === "success" && data.text) {
+              setTranscripts((prev) => [...prev, data.text]);
             }
+          } catch (error) {
+            console.error("Backend connection error:", error);
           }
-        };
-
-        recorder.start();
+        }
       };
 
-      startNewChunk();
-
-      chunkIntervalRef.current = setInterval(() => {
-        if (currentRecorder && currentRecorder.state === "recording") {
-          currentRecorder.stop();
-          startNewChunk(); 
-        }
-      }, 8000);
+      // Start recording with 8000ms timeslice (sends chunk every 8s automatically)
+      recorder.start(8000);
 
     } catch (error) {
       console.error("Recording error:", error);
@@ -125,9 +119,24 @@ export default function Home() {
     }
   };
 
-  // Stop Recording and Generate Summary
+  // ✅ Pause / Resume toggle – uses native MediaRecorder methods
+  const togglePause = () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder) return;
+
+    if (recorder.state === "recording") {
+      recorder.pause();
+      setIsPaused(true);
+    } else if (recorder.state === "paused") {
+      recorder.resume();
+      setIsPaused(false);
+    }
+  };
+
+  // Stop Recording and Generate Summary – NO CHANGE except clearing pause state on stop
   const stopRecording = async () => {
     setIsRecording(false);
+    setIsPaused(false); // reset pause when stopping
     isRecordingRef.current = false;
     setIsSummarizing(true); 
 
@@ -165,14 +174,14 @@ export default function Home() {
     }
   };
 
-  // NEW: Reset Session to start over
+  // NEW: Reset Session to start over – NO CHANGE
   const resetSession = () => {
     setSummary("");
     setTranscripts([]);
     // We intentionally keep `persona` and `isContextLoaded` so users don't have to re-upload/select for the next meeting.
   };
 
-  // Utility Functions
+  // Utility Functions – NO CHANGE
   const copyToClipboard = () => {
     navigator.clipboard.writeText(summary);
     alert("📋 คัดลอกรายงานเรียบร้อยแล้ว!");
@@ -344,11 +353,41 @@ export default function Home() {
         {!summary && (
           <div className="mb-12 relative w-full flex justify-center z-20">
             {isRecording ? (
-              <button onClick={stopRecording} className="group relative flex items-center space-x-4 px-10 py-6 bg-rose-600/10 border border-rose-500/50 backdrop-blur-md text-white font-bold rounded-full text-sm shadow-[0_0_40px_rgba(225,29,72,0.3)] hover:shadow-[0_0_60px_rgba(225,29,72,0.5)] hover:bg-rose-600/20 active:scale-95 transition-all duration-300 overflow-hidden">
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]"></div>
-                <div className="w-3 h-3 bg-rose-500 rounded-sm animate-pulse"></div>
-                <span className="tracking-widest uppercase text-rose-100">Terminate & Analyze</span>
-              </button>
+              /* ✅ Added Pause/Resume button alongside Stop */
+              <div className="flex items-center space-x-4">
+                {/* Pause / Resume button */}
+                <button 
+                  onClick={togglePause} 
+                  className={`group relative flex items-center space-x-3 px-8 py-5 font-bold rounded-full text-sm transition-all duration-300 ${
+                    isPaused
+                      ? "bg-emerald-600/10 border border-emerald-500/50 text-emerald-300 shadow-[0_0_25px_rgba(16,185,129,0.3)] hover:bg-emerald-600/20"
+                      : "bg-amber-500/10 border border-amber-500/50 text-amber-300 shadow-[0_0_25px_rgba(245,158,11,0.3)] hover:bg-amber-500/20"
+                  }`}
+                >
+                  {isPaused ? (
+                    <>
+                      <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                      <span className="tracking-widest uppercase">Resume</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+                      </svg>
+                      <span className="tracking-widest uppercase">Pause</span>
+                    </>
+                  )}
+                </button>
+
+                {/* Terminate & Analyze button (original) */}
+                <button onClick={stopRecording} className="group relative flex items-center space-x-4 px-10 py-6 bg-rose-600/10 border border-rose-500/50 backdrop-blur-md text-white font-bold rounded-full text-sm shadow-[0_0_40px_rgba(225,29,72,0.3)] hover:shadow-[0_0_60px_rgba(225,29,72,0.5)] hover:bg-rose-600/20 active:scale-95 transition-all duration-300 overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]"></div>
+                  <div className="w-3 h-3 bg-rose-500 rounded-sm animate-pulse"></div>
+                  <span className="tracking-widest uppercase text-rose-100">Terminate & Analyze</span>
+                </button>
+              </div>
             ) : isSummarizing ? (
               <div className="flex flex-col items-center space-y-6 bg-black/40 backdrop-blur-xl border border-white/10 p-8 rounded-3xl w-full max-w-md">
                 <div className="relative w-20 h-20 flex items-center justify-center">
@@ -382,10 +421,13 @@ export default function Home() {
             <div className="bg-white/[0.02] px-8 py-5 border-b border-white/[0.05] flex justify-between items-center z-10 shadow-sm">
               <div className="flex items-center space-x-4">
                 <div className="relative flex h-4 w-4 items-center justify-center">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-50"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,1)]"></span>
+                  {/* Indicator changes when paused */}
+                  <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${isPaused ? 'bg-amber-400' : 'bg-emerald-400'} opacity-50`}></span>
+                  <span className={`relative inline-flex rounded-full h-2 w-2 ${isPaused ? 'bg-amber-500' : 'bg-emerald-500'} shadow-[0_0_8px_rgba(16,185,129,1)]`}></span>
                 </div>
-                <span className="text-xs text-slate-300 font-bold tracking-[0.2em] uppercase">Live Cognitive Stream</span>
+                <span className="text-xs text-slate-300 font-bold tracking-[0.2em] uppercase">
+                  {isPaused ? "⏸️ Live Stream Paused" : "Live Cognitive Stream"}
+                </span>
               </div>
               <div className="flex items-center space-x-3">
                 <span className="bg-white/[0.05] border border-white/[0.05] px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest text-slate-400">
@@ -415,7 +457,7 @@ export default function Home() {
                   </div>
                 ))
               )}
-              {isRecording && transcripts.length > 0 && (
+              {isRecording && transcripts.length > 0 && !isPaused && (
                 <div className="flex space-x-2 items-center p-4 opacity-50">
                   <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
                   <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
