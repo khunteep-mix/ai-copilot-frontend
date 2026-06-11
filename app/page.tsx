@@ -5,6 +5,7 @@ import { useState, useRef, useEffect } from "react";
 export default function Home() {
   // State Management
   const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false); // NEW: State สำหรับ Pause
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [summary, setSummary] = useState<string>(""); 
   const [transcripts, setTranscripts] = useState<string[]>([]);
@@ -18,6 +19,11 @@ export default function Home() {
   const transcriptEndRef = useRef<HTMLDivElement | null>(null); 
   const chunkIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isRecordingRef = useRef<boolean>(false);
+  
+  // NEW: Refs สำหรับ Real EQ Visualizer
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const eqBarsRef = useRef<(HTMLDivElement | null)[]>([]);
 
   // Auto-scroll to bottom of transcripts
   useEffect(() => {
@@ -49,11 +55,29 @@ export default function Home() {
     }
   };
 
+  // NEW: ฟังก์ชันสลับสถานะ Pause / Resume
+  const togglePause = () => {
+    if (!mediaRecorderRef.current) return;
+
+    if (mediaRecorderRef.current.state === "paused") {
+      mediaRecorderRef.current.resume();
+      setIsPaused(false);
+    } else if (mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.pause();
+      setIsPaused(true);
+      // รีเซ็ตความสูงแท่ง EQ กลับเป็นค่าต่ำสุดตอนหยุดพัก
+      eqBarsRef.current.forEach(bar => {
+        if (bar) bar.style.height = '15%'; 
+      });
+    }
+  };
+
   // Start Recording Session
   const startRecording = async () => {
     try {
       setSummary(""); 
       setTranscripts([]); 
+      setIsPaused(false); // Reset pause state
       
       await fetch("https://my-ai-backend-be42.onrender.com/api/meeting/reset", { method: "POST" });
       
@@ -73,6 +97,37 @@ export default function Home() {
       streamRef.current = audioStream;
       setIsRecording(true);
       isRecordingRef.current = true;
+
+      // --- NEW: Real EQ Visualizer Setup ---
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 64; // จำนวนย่านความถี่
+      const source = audioContext.createMediaStreamSource(audioStream);
+      source.connect(analyser);
+      analyserRef.current = analyser;
+
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+      const updateEQ = () => {
+        if (!isRecordingRef.current) return;
+
+        // เช็คว่าไม่ได้ Pause อยู่ ถึงจะกระดิกแท่ง EQ
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'paused') {
+          analyser.getByteFrequencyData(dataArray);
+          eqBarsRef.current.forEach((bar, index) => {
+            if (bar) {
+              const dataIndex = Math.floor((index / eqBarsRef.current.length) * dataArray.length);
+              const value = dataArray[dataIndex];
+              const height = Math.max(15, (value / 255) * 100);
+              bar.style.height = `${height}%`;
+            }
+          });
+        }
+        animationFrameRef.current = requestAnimationFrame(updateEQ);
+      };
+
+      updateEQ();
+      // -------------------------------------
 
       audioTrack.onended = () => stopRecording();
 
@@ -112,6 +167,7 @@ export default function Home() {
       startNewChunk();
 
       chunkIntervalRef.current = setInterval(() => {
+        // เมื่อ Pause อยู่ state จะไม่ใช่ "recording" ทำให้การตัด Chunk หยุดชั่วคราวอัตโนมัติ!
         if (currentRecorder && currentRecorder.state === "recording") {
           currentRecorder.stop();
           startNewChunk(); 
@@ -121,6 +177,7 @@ export default function Home() {
     } catch (error) {
       console.error("Recording error:", error);
       setIsRecording(false);
+      setIsPaused(false);
       isRecordingRef.current = false;
     }
   };
@@ -128,8 +185,19 @@ export default function Home() {
   // Stop Recording and Generate Summary
   const stopRecording = async () => {
     setIsRecording(false);
+    setIsPaused(false);
     isRecordingRef.current = false;
     setIsSummarizing(true); 
+
+    // --- NEW: Cleanup Web Audio ---
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
+    if (analyserRef.current) {
+      analyserRef.current.context.close();
+      analyserRef.current = null;
+    }
+    // ----------------------------
 
     if (chunkIntervalRef.current) {
       clearInterval(chunkIntervalRef.current);
@@ -165,11 +233,10 @@ export default function Home() {
     }
   };
 
-  // NEW: Reset Session to start over
+  // Reset Session to start over
   const resetSession = () => {
     setSummary("");
     setTranscripts([]);
-    // We intentionally keep `persona` and `isContextLoaded` so users don't have to re-upload/select for the next meeting.
   };
 
   // Utility Functions
@@ -218,17 +285,6 @@ export default function Home() {
           100% { opacity: 1; transform: translateY(0); }
         }
         .animate-fade-in-up { animation: fade-in-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        
-        @keyframes equalizer {
-          0%, 100% { height: 8px; }
-          50% { height: 24px; }
-        }
-        .eq-bar { animation: equalizer 1s ease-in-out infinite; }
-        .eq-bar:nth-child(1) { animation-delay: 0.1s; }
-        .eq-bar:nth-child(2) { animation-delay: 0.3s; }
-        .eq-bar:nth-child(3) { animation-delay: 0.0s; }
-        .eq-bar:nth-child(4) { animation-delay: 0.4s; }
-        .eq-bar:nth-child(5) { animation-delay: 0.2s; }
 
         /* Custom Scrollbar for Glassmorphism */
         ::-webkit-scrollbar { width: 6px; }
@@ -240,11 +296,12 @@ export default function Home() {
       {/* Futuristic Header */}
       <header className="w-full max-w-6xl flex items-center justify-between mb-10 z-10 bg-white/[0.02] backdrop-blur-xl border border-white/[0.05] py-4 px-6 rounded-3xl shadow-[0_8px_32px_rgba(0,0,0,0.3)]">
         <div className="flex items-center space-x-4">
-          <div className="relative flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 shadow-[0_0_25px_rgba(99,102,241,0.4)]">
+          <div className={`relative flex h-12 w-12 items-center justify-center rounded-2xl shadow-[0_0_25px_rgba(99,102,241,0.4)] transition-colors duration-500 ${isPaused ? 'bg-gradient-to-br from-yellow-500 via-orange-500 to-red-500' : 'bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500'}`}>
             <svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
             </svg>
-            {isRecording && <span className="absolute -top-1 -right-1 flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-red-500 border-2 border-[#020617]"></span></span>}
+            {isRecording && !isPaused && <span className="absolute -top-1 -right-1 flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span><span className="relative inline-flex rounded-full h-3 w-3 bg-red-500 border-2 border-[#020617]"></span></span>}
+            {isPaused && <span className="absolute -top-1 -right-1 flex h-3 w-3"><span className="relative inline-flex rounded-full h-3 w-3 bg-yellow-500 border-2 border-[#020617]"></span></span>}
           </div>
           <div>
             <h1 className="text-2xl font-black tracking-tighter bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">AURA<span className="font-light">COPILOT</span></h1>
@@ -253,22 +310,30 @@ export default function Home() {
         </div>
         
         {isRecording && (
-          <div className="hidden md:flex items-center space-x-3 px-5 py-2 bg-red-500/10 border border-red-500/20 rounded-full shadow-[0_0_15px_rgba(239,68,68,0.2)]">
+          <div className={`hidden md:flex items-center space-x-3 px-5 py-2 border rounded-full transition-all duration-300 ${isPaused ? 'bg-yellow-500/10 border-yellow-500/20 shadow-[0_0_15px_rgba(234,179,8,0.2)]' : 'bg-red-500/10 border-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.2)]'}`}>
+            {/* NEW: Real EQ Visualizer Elements */}
             <div className="flex items-end space-x-1 h-4">
-              <div className="w-1 bg-red-400 rounded-full eq-bar"></div>
-              <div className="w-1 bg-red-400 rounded-full eq-bar"></div>
-              <div className="w-1 bg-red-400 rounded-full eq-bar"></div>
-              <div className="w-1 bg-red-400 rounded-full eq-bar"></div>
-              <div className="w-1 bg-red-400 rounded-full eq-bar"></div>
+              {[...Array(5)].map((_, i) => (
+                <div
+                  key={i}
+                  ref={(el) => {
+                    if (el) eqBarsRef.current[i] = el;
+                  }}
+                  className={`w-1 rounded-full transition-all duration-[50ms] ${isPaused ? 'bg-yellow-400' : 'bg-red-400'}`}
+                  style={{ height: '15%' }}
+                ></div>
+              ))}
             </div>
-            <span className="text-xs font-bold text-red-400 tracking-wider">RECORDING</span>
+            <span className={`text-xs font-bold tracking-wider ${isPaused ? 'text-yellow-400' : 'text-red-400'}`}>
+              {isPaused ? "PAUSED" : "RECORDING"}
+            </span>
           </div>
         )}
       </header>
 
       <div className="w-full max-w-6xl z-10 flex flex-col items-center">
         
-        {/* Dashboard Configuration (Only show when NOT recording and NO summary) */}
+        {/* Dashboard Configuration */}
         {!isRecording && !isSummarizing && !summary && (
           <div className="w-full flex flex-col items-center animate-fade-in-up">
             <div className="text-center mb-12">
@@ -344,11 +409,26 @@ export default function Home() {
         {!summary && (
           <div className="mb-12 relative w-full flex justify-center z-20">
             {isRecording ? (
-              <button onClick={stopRecording} className="group relative flex items-center space-x-4 px-10 py-6 bg-rose-600/10 border border-rose-500/50 backdrop-blur-md text-white font-bold rounded-full text-sm shadow-[0_0_40px_rgba(225,29,72,0.3)] hover:shadow-[0_0_60px_rgba(225,29,72,0.5)] hover:bg-rose-600/20 active:scale-95 transition-all duration-300 overflow-hidden">
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]"></div>
-                <div className="w-3 h-3 bg-rose-500 rounded-sm animate-pulse"></div>
-                <span className="tracking-widest uppercase text-rose-100">Terminate & Analyze</span>
-              </button>
+              <div className="flex items-center space-x-4">
+                {/* NEW: Pause / Resume Button */}
+                <button onClick={togglePause} className={`group relative flex items-center space-x-3 px-8 py-6 border backdrop-blur-md text-white font-bold rounded-full text-sm shadow-[0_0_40px_rgba(249,115,22,0.3)] hover:shadow-[0_0_60px_rgba(249,115,22,0.5)] transition-all duration-300 overflow-hidden ${isPaused ? 'bg-yellow-500/10 border-yellow-500/50' : 'bg-orange-500/10 border-orange-500/50'}`}>
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    {isPaused ? (
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                    ) : (
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6" />
+                    )}
+                  </svg>
+                  <span className="tracking-widest uppercase">{isPaused ? "Resume" : "Pause"}</span>
+                </button>
+
+                {/* Stop & Summarize Button */}
+                <button onClick={stopRecording} className="group relative flex items-center space-x-3 px-10 py-6 bg-rose-600/10 border border-rose-500/50 backdrop-blur-md text-white font-bold rounded-full text-sm shadow-[0_0_40px_rgba(225,29,72,0.3)] hover:shadow-[0_0_60px_rgba(225,29,72,0.5)] hover:bg-rose-600/20 active:scale-95 transition-all duration-300 overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]"></div>
+                  <div className="w-3 h-3 bg-rose-500 rounded-sm animate-pulse"></div>
+                  <span className="tracking-widest uppercase text-rose-100">Terminate & Analyze</span>
+                </button>
+              </div>
             ) : isSummarizing ? (
               <div className="flex flex-col items-center space-y-6 bg-black/40 backdrop-blur-xl border border-white/10 p-8 rounded-3xl w-full max-w-md">
                 <div className="relative w-20 h-20 flex items-center justify-center">
@@ -382,10 +462,12 @@ export default function Home() {
             <div className="bg-white/[0.02] px-8 py-5 border-b border-white/[0.05] flex justify-between items-center z-10 shadow-sm">
               <div className="flex items-center space-x-4">
                 <div className="relative flex h-4 w-4 items-center justify-center">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-50"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,1)]"></span>
+                  <span className={`absolute inline-flex h-full w-full rounded-full opacity-50 ${isPaused ? 'bg-yellow-400' : 'bg-emerald-400 animate-ping'}`}></span>
+                  <span className={`relative inline-flex rounded-full h-2 w-2 ${isPaused ? 'bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,1)]' : 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,1)]'}`}></span>
                 </div>
-                <span className="text-xs text-slate-300 font-bold tracking-[0.2em] uppercase">Live Cognitive Stream</span>
+                <span className="text-xs text-slate-300 font-bold tracking-[0.2em] uppercase">
+                  {isPaused ? "Signal Paused" : "Live Cognitive Stream"}
+                </span>
               </div>
               <div className="flex items-center space-x-3">
                 <span className="bg-white/[0.05] border border-white/[0.05] px-4 py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest text-slate-400">
@@ -415,7 +497,7 @@ export default function Home() {
                   </div>
                 ))
               )}
-              {isRecording && transcripts.length > 0 && (
+              {isRecording && !isPaused && transcripts.length > 0 && (
                 <div className="flex space-x-2 items-center p-4 opacity-50">
                   <div className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
                   <div className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
@@ -447,7 +529,7 @@ export default function Home() {
                   </div>
                 </div>
                 
-                {/* NEW: Reset Session Button (Top Right) */}
+                {/* Reset Session Button */}
                 <button onClick={resetSession} className="flex items-center justify-center space-x-2 px-5 py-3 bg-white/[0.05] hover:bg-indigo-500/20 text-slate-300 hover:text-indigo-300 font-bold text-xs rounded-xl border border-white/10 hover:border-indigo-500/30 transition-all duration-300 self-start md:self-auto">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
                   <span>START NEW SESSION</span>
